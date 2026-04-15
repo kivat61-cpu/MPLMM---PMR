@@ -1,0 +1,9 @@
+*.pt
+*.pth
+*.pkl
+*.npy
+*.pth.tar
+outputs/
+data/
+**/__pycache__/
+*.pyc
