@@ -121,6 +121,11 @@ def get_arguments():
 
     parser.add_argument('--gpu', type=int, default=0)  # gpu
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
+    parser.add_argument('--drop_rate', type=float, default=0.2, 
+                        help='训练时模拟模态缺失的概率 (默认: 0.2)')
+    
+    parser.add_argument('--full_data', action='store_true',
+                        help='如果加上此参数，训练集将强制不模拟缺失 (相当于退化为普通双模态)')
 
     # args = parser.parse_args()
     #
@@ -199,13 +204,12 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
         c_ids = batch_data['code_input_ids'].to(device)
         c_mask = batch_data['code_attention_mask'].to(device)
         label = batch_data['label'].to(device)
+        missing_mod = batch_data['missing_mode'].to(device)
         optimizer.zero_grad()
         
         # === 修改点 1：根据开关选择模型调用方式 ===
         if args.use_mplmm:
-            # 融合模型需要输入 missing_mod (2 代表训练时不缺失)
-            # 并且直接返回 5 个值 (a, v, out, out_a, out_v)
-            missing_mod = torch.full((label.size(0),), 2).to(device)
+            # 融合直接返回 5 个值 (a, v, out, out_a, out_v)
             a, v, out, out_a, out_v = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
         else:
             # 基础模型只返回 3 个值 (a, v, out)
@@ -436,13 +440,13 @@ def valid(args, model, device, dataloader, audio_proto, visual_proto):
             c_ids = batch_data['code_input_ids'].to(device)
             c_mask = batch_data['code_attention_mask'].to(device)
             label = batch_data['label'].to(device)
+            missing_mod = batch_data['missing_mode'].to(device)
 
 
             # === 根据开关选择模型调用方式 ===
             if args.use_mplmm:
-                # 融合模型需要输入 missing_mod (2 代表训练时不缺失)
-                # 并且直接返回 5 个值 (a, v, out, out_a, out_v)
-                missing_mod = torch.full((label.size(0),), 2).to(device)
+                # 直接返回 5 个值 (a, v, out, out_a, out_v)
+                # missing_mod = torch.full((label.size(0),), 2).to(device)
                 a, v, out, out_a, out_v = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
             else:
                 # 基础模型只返回 3 个值 (a, v, out)
@@ -568,11 +572,12 @@ def calculate_prototype(args, model, dataloader, device, epoch, a_proto=None, v_
             c_ids = batch_data['code_input_ids'].to(device)
             c_mask = batch_data['code_attention_mask'].to(device)
             label = batch_data['label'].to(device)
+            missing_mod = batch_data['missing_mode'].to(device)
 
             # 把文本和代码喂给模型，不要改接收变量的名字
             # a, v, out = model(t_ids, t_mask, c_ids, c_mask)
             if args.use_mplmm:
-                missing_mod = torch.full((label.size(0),), 2).to(device)
+                # missing_mod = torch.full((label.size(0),), 2).to(device)
                 # 只需要特征 a 和 v，忽略后面三个返回值
                 a, v, _, _, _ = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
             else:
@@ -684,23 +689,43 @@ def main():
         temp_df, test_size=0.5, random_state=42, stratify=temp_df['label']
     )
 
-    train_dataset = TextCodeDataset(train_df)
-    test_dataset = TextCodeDataset(test_df)
+    # train_dataset = TextCodeDataset(train_df, drop_rate=0.4, full_data=False)
+    # val_dataset = TextCodeDataset(val_df, full_data=True) 
+    # test_dataset = TextCodeDataset(test_df, drop_rate=0.0, full_data=True)
+    train_dataset = TextCodeDataset(
+        train_df, 
+        drop_rate=args.drop_rate, 
+        full_data=args.full_data
+    )
     
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    # 验证集和测试集：强行写死 full_data=True
+    val_dataset = TextCodeDataset(
+        val_df, 
+        drop_rate=args.drop_rate, 
+        full_data=True 
+    )
+    
+    test_dataset = TextCodeDataset(
+        test_df, 
+        drop_rate=args.drop_rate, 
+        full_data=True 
+    )
+    
+    # train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    # test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
     # === 结束 ===
 
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size,
-                                  shuffle=True, pin_memory=False)  # 计算机的内存充足的时候，可以设置pin_memory=True
-
+                                  shuffle=True, num_workers=4, pin_memory=False)  # 计算机的内存充足的时候，可以设置pin_memory=True
+    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size,
+                                 shuffle=False, num_workers=4, pin_memory=False)
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size,
-                                 shuffle=False, pin_memory=False)
+                                 shuffle=False, num_workers=4, pin_memory=False)
 
     if args.dataset == 'AVE':
         val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size,
-                                    shuffle=False, pin_memory=False)
+                                    shuffle=False, num_workers=4, pin_memory=False)
     elif args.dataset == 'CGMNIST':
         val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size,
                                     shuffle=True, pin_memory=False)
@@ -765,7 +790,7 @@ def main():
             print('per epoch time: ', e_time - s_time)
             # print('proto22', audio_proto[22], visual_proto[22])
             # acc, acc_a, acc_v, acc_a_p, acc_v_p = valid(args, model, device, test_dataloader, audio_proto, visual_proto)
-            acc, acc_a, acc_v, acc_a_p, acc_v_p, precision, recall, f1 = valid(args, model, device, test_dataloader, audio_proto, visual_proto)
+            acc, acc_a, acc_v, acc_a_p, acc_v_p, precision, recall, f1 = valid(args, model, device, val_dataloader, audio_proto, visual_proto)
              # === 修改：控制台打印得更漂亮专业 ===
             print(f'Epoch {epoch} 考试成绩 ---> Acc: {acc*100:.2f}% | Precision: {precision*100:.2f}% | Recall: {recall*100:.2f}% | F1-Score: {f1*100:.2f}%')
             print('epoch: ', epoch, 'loss: ', batch_loss, batch_loss_a_p, batch_loss_v_p)
