@@ -157,7 +157,7 @@ def grad_amplitude_diff(v1, v2):
 
 
 def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
-                audio_proto, visual_proto, writer=None):
+                text_proto, code_proto, writer=None):
     criterion = nn.CrossEntropyLoss()
     softmax = nn.Softmax(dim=1)
     relu = nn.ReLU(inplace=True)
@@ -167,17 +167,17 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
     print("Start training ... ")
 
     _loss = 0
-    _loss_a = 0
-    _loss_v = 0
-    _loss_p_a = 0
-    _loss_p_v = 0
+    _loss_t = 0
+    _loss_c = 0
+    _loss_p_t = 0
+    _loss_p_c = 0
 
-    _a_angle = 0
-    _v_angle = 0
-    _a_diff = 0
-    _v_diff = 0
-    _ratio_a = 0
-    _ratio_a_p = 0
+    _t_angle = 0
+    _c_angle = 0
+    _t_diff = 0
+    _c_diff = 0
+    _ratio_t = 0
+    _ratio_t_p = 0
 
     # angle_file = args.logs_path + '/Method-CE-Proto-grad-amp' + '/angle-' + args.dataset + '-' + args.fusion_method + '-bsz' + \
     #              str(args.batch_size) + '-lr' + str(args.learning_rate) \
@@ -209,89 +209,69 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
         
         # === 修改点 1：根据开关选择模型调用方式 ===
         if args.use_mplmm:
-            # 融合直接返回 5 个值 (a, v, out, out_a, out_v)
-            a, v, out, out_a, out_v = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+            # 融合直接返回 5 个值 (t, c, out, out_t, out_c)
+            t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
         else:
-            # 基础模型只返回 3 个值 (a, v, out)
-            a, v, out = model(t_ids, t_mask, c_ids, c_mask)
+            # 基础模型只返回 3 个值 (t, c, out)
+            t, c, out = model(t_ids, t_mask, c_ids, c_mask)
 
             # === 修改点 2：将原本繁琐的单模态计算逻辑移入 else 分支 ===
             if args.fusion_method == 'sum':
-                out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
+                out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
                          model.fusion_module.fc_y.bias)
-                out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
+                out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
                          model.fusion_module.fc_x.bias)
             elif args.fusion_method == 'concat':
                 weight_size = model.fusion_module.fc_out.weight.size(1)
-                out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
+                out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
                          + model.fusion_module.fc_out.bias / 2)
-                out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
+                out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
                          + model.fusion_module.fc_out.bias / 2)
             elif args.fusion_method == 'film' or args.fusion_method == 'gated':
-                out_v = out
-                out_a = out
-        # 喂给模型
-        # a, v, out = model(t_ids, t_mask, c_ids, c_mask)
-        # if args.fusion_method == 'sum':
-        #     out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
-        #              model.fusion_module.fc_y.bias)
-        #     out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
-        #              model.fusion_module.fc_x.bias)
-        # elif args.fusion_method == 'concat':
-        #     weight_size = model.fusion_module.fc_out.weight.size(1)
-        #     out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
-        #              + model.fusion_module.fc_out.bias / 2)
-        #     out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
-        #              + model.fusion_module.fc_out.bias / 2)
-        # elif args.fusion_method == 'film':
-        #     out_v = out
-        #     out_a = out
-        # elif args.fusion_method == 'gated':
-        #     out_v = out
-        #     out_a = out
+                out_c = out
+                out_t = out
 
-        audio_sim = -EU_dist(a, audio_proto)  # B x n_class
-        visual_sim = -EU_dist(v, visual_proto)  # B x n_class
-        # print('sim: ', audio_sim[0][0].data, visual_sim[0][0].data, a[0][0].data, v[0][0].data)
+        text_sim = -EU_dist(t, text_proto)  # B x n_class
+        code_sim = -EU_dist(c, code_proto)  # B x n_class
 
         if args.modulation == 'Proto' and args.modulation_starts <= epoch <= args.modulation_ends:
 
-            score_a_p = sum([softmax(audio_sim)[i][label[i]] for i in range(audio_sim.size(0))])
-            score_v_p = sum([softmax(visual_sim)[i][label[i]] for i in range(visual_sim.size(0))])
-            ratio_a_p = score_a_p / score_v_p
+            score_t_p = sum([softmax(text_sim)[i][label[i]] for i in range(text_sim.size(0))])
+            score_c_p = sum([softmax(code_sim)[i][label[i]] for i in range(code_sim.size(0))])
+            ratio_t_p = score_t_p / score_c_p
 
-            score_v = sum([softmax(out_v)[i][label[i]] for i in range(out_v.size(0))])
-            score_a = sum([softmax(out_a)[i][label[i]] for i in range(out_a.size(0))])
-            ratio_a = score_a / score_v
+            score_c = sum([softmax(out_c)[i][label[i]] for i in range(out_c.size(0))])
+            score_t = sum([softmax(out_t)[i][label[i]] for i in range(out_t.size(0))])
+            ratio_t = score_t / score_c
 
-            loss_proto_a = criterion(audio_sim, label)
-            loss_proto_v = criterion(visual_sim, label)
+            loss_proto_t = criterion(text_sim, label)
+            loss_proto_c = criterion(code_sim, label)
 
-            if ratio_a_p > 1:
-                beta = 0  # audio coef
-                lam = 1 * args.alpha  # visual coef
-            elif ratio_a_p < 1:
+            if ratio_t_p > 1:
+                beta = 0  # text coef
+                lam = 1 * args.alpha  # code coef
+            elif ratio_t_p < 1:
                 beta = 1 * args.alpha
                 lam = 0
             else:
                 beta = 0
                 lam = 0
-            loss = criterion(out, label) + beta * loss_proto_a + lam * loss_proto_v
-            loss_v = criterion(out_v, label)
-            loss_a = criterion(out_a, label)
+            loss = criterion(out, label) + beta * loss_proto_t + lam * loss_proto_c
+            loss_c = criterion(out_c, label)
+            loss_t = criterion(out_t, label)
         else:
             loss = criterion(out, label)
-            loss_proto_v = criterion(visual_sim, label)
-            loss_proto_a = criterion(audio_sim, label)
-            loss_v = criterion(out_v, label)
-            loss_a = criterion(out_a, label)
+            loss_proto_c = criterion(code_sim, label)
+            loss_proto_t = criterion(text_sim, label)
+            loss_c = criterion(out_c, label)
+            loss_t = criterion(out_t, label)
 
-            score_a_p = sum([softmax(audio_sim)[i][label[i]] for i in range(audio_sim.size(0))])
-            score_v_p = sum([softmax(visual_sim)[i][label[i]] for i in range(visual_sim.size(0))])
-            ratio_a_p = score_a_p / score_v_p
-            score_v = sum([softmax(out_v)[i][label[i]] for i in range(out_v.size(0))])
-            score_a = sum([softmax(out_a)[i][label[i]] for i in range(out_a.size(0))])
-            ratio_a = score_a / score_v
+            score_t_p = sum([softmax(text_sim)[i][label[i]] for i in range(text_sim.size(0))])
+            score_c_p = sum([softmax(code_sim)[i][label[i]] for i in range(code_sim.size(0))])
+            ratio_t_p = score_t_p / score_c_p
+            score_c = sum([softmax(out_c)[i][label[i]] for i in range(out_c.size(0))])
+            score_t = sum([softmax(out_t)[i][label[i]] for i in range(out_t.size(0))])
+            ratio_t = score_t / score_c
 
         if args.fusion_method == 'sum' or args.fusion_method == 'concat':
             # grad_a = torch.Tensor([]).to(device)
@@ -299,7 +279,7 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
             # grad_a_fusion = torch.Tensor([]).to(device)
             # grad_v_fusion = torch.Tensor([]).to(device)
             #
-            # loss_v.backward(retain_graph=True)
+            # loss_c.backward(retain_graph=True)
             # if args.dataset != 'CGMNIST':
             #     for parms in model.visual_net.parameters():
             #         grad_v = torch.cat((grad_v, parms.grad.flatten()), 0)
@@ -308,7 +288,7 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
             #         grad_v = torch.cat((grad_v, parms.grad.flatten()), 0)
             # optimizer.zero_grad()
             #
-            # loss_a.backward(retain_graph=True)
+            # loss_t.backward(retain_graph=True)
             # if args.dataset != 'CGMNIST':
             #     for parms in model.audio_net.parameters():
             #         grad_a = torch.cat((grad_a, parms.grad.flatten()), 0)
@@ -330,68 +310,68 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
             #         grad_v_fusion = torch.cat((grad_v_fusion, parms.grad.flatten()), 0)
             #
             # # calculate the angle  期望的方向和实际更新的方向的差值
-            # _, a_angle = dot_product_angle_tensor(grad_a, grad_a_fusion)
-            # _, v_angle = dot_product_angle_tensor(grad_v, grad_v_fusion)
-            # _a_angle += a_angle
-            # _v_angle += v_angle
+            # _, t_angle = dot_product_angle_tensor(grad_a, grad_a_fusion)
+            # _, c_angle = dot_product_angle_tensor(grad_v, grad_v_fusion)
+            # _t_angle += t_angle
+            # _c_angle += c_angle
             #
-            # a_amp, a_f_amp, a_diff = grad_amplitude_diff(grad_a, grad_a_fusion)
-            # v_amp, v_f_amp, v_diff = grad_amplitude_diff(grad_v, grad_v_fusion)
-            # _a_diff += a_diff
-            # _v_diff += v_diff
+            # a_amp, a_f_amp, t_diff = grad_amplitude_diff(grad_a, grad_a_fusion)
+            # v_amp, v_f_amp, c_diff = grad_amplitude_diff(grad_v, grad_v_fusion)
+            # _t_diff += t_diff
+            # _c_diff += c_diff
 
-            # f_angle.write(str(ratio_a) +
-            #               "\t" + str(ratio_a_p) +
-            #               "\t" + str(a_angle) +
-            #               "\t" + str(v_angle) +
+            # f_angle.write(str(ratio_t) +
+            #               "\t" + str(ratio_t_p) +
+            #               "\t" + str(t_angle) +
+            #               "\t" + str(c_angle) +
             #               "\t" + str(a_amp) +
             #               "\t" + str(a_f_amp) +
-            #               "\t" + str(a_diff) +
+            #               "\t" + str(t_diff) +
             #               "\t" + str(v_amp) +
             #               "\t" + str(v_f_amp) +
-            #               "\t" + str(v_diff) +
+            #               "\t" + str(c_diff) +
             #               "\n")
             # f_angle.flush()
 
-            # print('ratio: ', ratio_a, ratio_a_p, a_angle, v_angle)
+            # print('ratio: ', ratio_t, ratio_t_p, t_angle, c_angle)
         else:
             loss.backward()
-            print('ratio: ', ratio_a, ratio_a_p)
-            # f_angle.write(str(ratio_a) +
-            #               "\t" + str(ratio_a_p) +
+            print('ratio: ', ratio_t, ratio_t_p)
+            # f_angle.write(str(ratio_t) +
+            #               "\t" + str(ratio_t_p) +
             #               "\n")
             # f_angle.flush()
 
-            a_angle = 0
-            v_angle = 0
-            _a_angle += a_angle
-            _v_angle += v_angle
-        print('loss: ', loss.data, 'loss_p_v: ', loss_proto_v.data, 'loss_p_a: ', loss_proto_a.data,
-              'loss_v: ', loss_v.data, 'loss_a: ', loss_a.data)
+            t_angle = 0
+            c_angle = 0
+            _t_angle += t_angle
+            _c_angle += c_angle
+        print('loss: ', loss.data, 'loss_p_c: ', loss_proto_c.data, 'loss_p_t: ', loss_proto_t.data,
+              'loss_c: ', loss_c.data, 'loss_t: ', loss_t.data)
 
         optimizer.step()
 
         _loss += loss.item()
-        _loss_a += loss_a.item()
-        _loss_v += loss_v.item()
-        _loss_p_a += loss_proto_a.item()
-        _loss_p_v += loss_proto_v.item()
-        # _ratio_a += ratio_a
-        # _ratio_a_p += ratio_a_p
-        _ratio_a += ratio_a.item() if isinstance(ratio_a, torch.Tensor) else ratio_a
-        _ratio_a_p += ratio_a_p.item() if isinstance(ratio_a_p, torch.Tensor) else ratio_a_p
+        _loss_t += loss_t.item()
+        _loss_c += loss_c.item()
+        _loss_p_t += loss_proto_t.item()
+        _loss_p_c += loss_proto_c.item()
+        # _ratio_t += ratio_t
+        # _ratio_t_p += ratio_t_p
+        _ratio_t += ratio_t.item() if isinstance(ratio_t, torch.Tensor) else ratio_t
+        _ratio_t_p += ratio_t_p.item() if isinstance(ratio_t_p, torch.Tensor) else ratio_t_p
 
     if args.optimizer == 'SGD':
         scheduler.step()
     # f_angle.close()
 
-    return _loss / len(dataloader), _loss_a / len(dataloader), _loss_v / len(dataloader), \
-           _loss_p_a / len(dataloader), _loss_p_v / len(dataloader), \
-           _a_angle / len(dataloader), _v_angle / len(dataloader), \
-           _ratio_a / len(dataloader), _ratio_a_p / len(dataloader), _a_diff / len(dataloader), _v_diff / len(dataloader)
+    return _loss / len(dataloader), _loss_t / len(dataloader), _loss_c / len(dataloader), \
+           _loss_p_t / len(dataloader), _loss_p_c / len(dataloader), \
+           _t_angle / len(dataloader), _c_angle / len(dataloader), \
+           _ratio_t / len(dataloader), _ratio_t_p / len(dataloader), _t_diff / len(dataloader), _c_diff / len(dataloader)
 
 
-def valid(args, model, device, dataloader, audio_proto, visual_proto):
+def valid(args, model, device, dataloader, text_proto, code_proto):
     softmax = nn.Softmax(dim=1)
 
     if args.dataset == 'VGGSound':
@@ -414,11 +394,11 @@ def valid(args, model, device, dataloader, audio_proto, visual_proto):
         # TODO: more flexible
         num = [0.0 for _ in range(n_classes)]
         acc = [0.0 for _ in range(n_classes)]
-        acc_a = [0.0 for _ in range(n_classes)]
-        acc_v = [0.0 for _ in range(n_classes)]
+        acc_t = [0.0 for _ in range(n_classes)]
+        acc_c = [0.0 for _ in range(n_classes)]
 
-        acc_a_p = [0.0 for _ in range(n_classes)]
-        acc_v_p = [0.0 for _ in range(n_classes)]
+        acc_t_p = [0.0 for _ in range(n_classes)]
+        acc_c_p = [0.0 for _ in range(n_classes)]
 
         # === 新增：装所有的真实标签和预测标签 ===
         all_true_labels = []
@@ -445,79 +425,58 @@ def valid(args, model, device, dataloader, audio_proto, visual_proto):
 
             # === 根据开关选择模型调用方式 ===
             if args.use_mplmm:
-                # 直接返回 5 个值 (a, v, out, out_a, out_v)
+                # 直接返回 5 个值 (t, c, out, out_t, out_c)
                 # missing_mod = torch.full((label.size(0),), 2).to(device)
-                a, v, out, out_a, out_v = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+                t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
             else:
-                # 基础模型只返回 3 个值 (a, v, out)
-                a, v, out = model(t_ids, t_mask, c_ids, c_mask)
+                # 基础模型只返回 3 个值 (t, c, out)
+                t, c, out = model(t_ids, t_mask, c_ids, c_mask)
 
                 # === 修改点 2：将原本繁琐的单模态计算逻辑移入 else 分支 ===
                 if args.fusion_method == 'sum':
-                    out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
+                    out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
                             model.fusion_module.fc_y.bias)
-                    out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
+                    out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
                             model.fusion_module.fc_x.bias)
                 elif args.fusion_method == 'concat':
                     weight_size = model.fusion_module.fc_out.weight.size(1)
-                    out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
+                    out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
                             + model.fusion_module.fc_out.bias / 2)
-                    out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
+                    out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
                             + model.fusion_module.fc_out.bias / 2)
                 elif args.fusion_method == 'film' or args.fusion_method == 'gated':
-                    out_v = out
-                    out_a = out
-
-            # a, v, out = model(t_ids, t_mask, c_ids, c_mask)
-            # if args.fusion_method == 'sum':
-            #     out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
-            #              model.fusion_module.fc_y.bias)
-            #     out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
-            #              model.fusion_module.fc_x.bias)
-            # elif args.fusion_method == 'concat':
-            #     weight_size = model.fusion_module.fc_out.weight.size(1)
-            #     out_v = (torch.mm(v, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
-            #              + model.fusion_module.fc_out.bias / 2)
-            #     out_a = (torch.mm(a, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
-            #              + model.fusion_module.fc_out.bias / 2)
-            # elif args.fusion_method == 'film':
-            #     out_v = out
-            #     out_a = out
-            # elif args.fusion_method == 'gated':
-            #     out_v = out
-            #     out_a = out
+                    out_c = out
+                    out_t = out
 
             prediction = softmax(out)
-            pred_v = softmax(out_v)
-            pred_a = softmax(out_a)
+            pred_c = softmax(out_c)
+            pred_t = softmax(out_t)
 
-            audio_sim = -EU_dist(a, audio_proto)  # B x n_class
-            visual_sim = -EU_dist(v, visual_proto)  # B x n_class
-            # print(audio_sim, visual_sim, (audio_sim != audio_sim).any(), (visual_sim != visual_sim).any())
-            pred_v_p = softmax(visual_sim)
-            pred_a_p = softmax(audio_sim)
-            # print('pred_p: ', (pred_a_p != pred_a_p).any(), (pred_v_p != pred_v_p).any())
+            text_sim = -EU_dist(t, text_proto)  # B x n_class
+            code_sim = -EU_dist(c, code_proto)  # B x n_class
+            # print(text_sim, code_sim, (text_sim != text_sim).any(), (code_sim != code_sim).any())
+            pred_c_p = softmax(code_sim)
+            pred_t_p = softmax(text_sim)
 
-            # for i in range(image.shape[0]):
             for i in range(label.shape[0]):
                 ma = np.argmax(prediction[i].cpu().data.numpy())
-                v = np.argmax(pred_v[i].cpu().data.numpy())
-                a = np.argmax(pred_a[i].cpu().data.numpy())
-                v_p = np.argmax(pred_v_p[i].cpu().data.numpy())
-                a_p = np.argmax(pred_a_p[i].cpu().data.numpy())
+                c_pred = np.argmax(pred_c[i].cpu().data.numpy())
+                t_pred = np.argmax(pred_t[i].cpu().data.numpy())
+                c_p_pred = np.argmax(pred_c_p[i].cpu().data.numpy())
+                t_p_pred = np.argmax(pred_t_p[i].cpu().data.numpy())
                 num[label[i]] += 1.0
 
                 # pdb.set_trace()
                 if np.asarray(label[i].cpu()) == ma:
                     acc[label[i]] += 1.0
-                if np.asarray(label[i].cpu()) == v:
-                    acc_v[label[i]] += 1.0
-                if np.asarray(label[i].cpu()) == a:
-                    acc_a[label[i]] += 1.0
-                if np.asarray(label[i].cpu()) == v_p:
-                    acc_v_p[label[i]] += 1.0
-                if np.asarray(label[i].cpu()) == a_p:
-                    acc_a_p[label[i]] += 1.0
+                if np.asarray(label[i].cpu()) == c_pred:
+                    acc_c[label[i]] += 1.0
+                if np.asarray(label[i].cpu()) == t_pred:
+                    acc_t[label[i]] += 1.0
+                if np.asarray(label[i].cpu()) == c_p_pred:
+                    acc_c_p[label[i]] += 1.0
+                if np.asarray(label[i].cpu()) == t_p_pred:
+                    acc_t_p[label[i]] += 1.0
                 # === 新增：保存每一道题的真实答案和模型的最终预测装 ===
                 all_true_labels.append(label[i].cpu().item())
                 all_pred_labels.append(ma)
@@ -538,11 +497,11 @@ def valid(args, model, device, dataloader, audio_proto, visual_proto):
     print(f"\n[类别 0] Precision: {precision_none[0]:.4f}, Recall: {recall_none[0]:.4f}, F1: {f1_none[0]:.4f}")
     print(f"[类别 1] Precision: {precision_none[1]:.4f}, Recall: {recall_none[1]:.4f}, F1: {f1_none[1]:.4f}")
 
-    return sum(acc) / sum(num), sum(acc_a) / sum(num), sum(acc_v) / sum(num), \
-           sum(acc_a_p) / sum(num), sum(acc_v_p) / sum(num), precision, recall, f1
+    return sum(acc) / sum(num), sum(acc_t) / sum(num), sum(acc_c) / sum(num), \
+           sum(acc_t_p) / sum(num), sum(acc_c_p) / sum(num), precision, recall, f1
 
 
-def calculate_prototype(args, model, dataloader, device, epoch, a_proto=None, v_proto=None):
+def calculate_prototype(args, model, dataloader, device, epoch, t_proto=None, c_proto=None):
     if args.dataset == 'VGGSound':
         n_classes = 309
     elif args.dataset == 'KineticSound':
@@ -558,8 +517,8 @@ def calculate_prototype(args, model, dataloader, device, epoch, a_proto=None, v_
     else:
         raise NotImplementedError('Incorrect dataset name {}'.format(args.dataset))
 
-    audio_prototypes = torch.zeros(n_classes, args.embed_dim).to(device)
-    visual_prototypes = torch.zeros(n_classes, args.embed_dim).to(device)
+    text_prototypes = torch.zeros(n_classes, args.embed_dim).to(device)
+    code_prototypes = torch.zeros(n_classes, args.embed_dim).to(device)
     count_class = [0 for _ in range(n_classes)]
 
     # calculate prototype
@@ -586,22 +545,18 @@ def calculate_prototype(args, model, dataloader, device, epoch, a_proto=None, v_
             label = batch_data['label'].to(device)
             missing_mod = batch_data['missing_mode'].to(device)
 
-            # 把文本和代码喂给模型，不要改接收变量的名字
-            # a, v, out = model(t_ids, t_mask, c_ids, c_mask)
+            # 把文本和代码喂给模型
             if args.use_mplmm:
-                # missing_mod = torch.full((label.size(0),), 2).to(device)
-                # 只需要特征 a 和 v，忽略后面三个返回值
-                a, v, _, _, _ = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+                # 只需要特征 t 和 c，忽略后面三个返回值
+                t, c, _, _, _ = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
             else:
-                a, v, out = model(t_ids, t_mask, c_ids, c_mask)
+                t, c, out = model(t_ids, t_mask, c_ids, c_mask)
 
-            for c, l in enumerate(label):
+            for idx, l in enumerate(label):
                 l = l.long()
                 count_class[l] += 1
-                audio_prototypes[l, :] += a[c, :]
-                visual_prototypes[l, :] += v[c, :]
-                # if l == 22:
-                #     print('fea_a', a[c, :], audio_prototypes[l, :])
+                text_prototypes[l, :] += t[idx, :]
+                code_prototypes[l, :] += c[idx, :]
 
             sample_count += 1
             if args.dataset == 'AVE':
@@ -609,17 +564,17 @@ def calculate_prototype(args, model, dataloader, device, epoch, a_proto=None, v_
             else:
                 if sample_count >= all_num // 10:
                     break
-    for c in range(audio_prototypes.shape[0]):
-        audio_prototypes[c, :] /= count_class[c]
-        visual_prototypes[c, :] /= count_class[c]
+    for c in range(text_prototypes.shape[0]):
+        text_prototypes[c, :] /= count_class[c]
+        code_prototypes[c, :] /= count_class[c]
 
     if epoch <= 0:
-        audio_prototypes = audio_prototypes
-        visual_prototypes = visual_prototypes
+        text_prototypes = text_prototypes
+        code_prototypes = code_prototypes
     else:
-        audio_prototypes = (1 - args.momentum_coef) * audio_prototypes + args.momentum_coef * a_proto
-        visual_prototypes = (1 - args.momentum_coef) * visual_prototypes + args.momentum_coef * v_proto
-    return audio_prototypes, visual_prototypes
+        text_prototypes = (1 - args.momentum_coef) * text_prototypes + args.momentum_coef * t_proto
+        code_prototypes = (1 - args.momentum_coef) * code_prototypes + args.momentum_coef * c_proto
+    return text_prototypes, code_prototypes
 
 
 def main():
@@ -783,7 +738,7 @@ def main():
         f_trainloss = open(trainloss_file, 'a')
 
         # === 新增：写入表头 ===
-        header = "Epoch\tTotal_Loss\tLoss_a_p\tLoss_v_p\tLoss_a\tLoss_v\tAcc_Fusion\tAcc_a_p\tAcc_v_p\tAcc_a\tAcc_v\tPrecision\tRecall\tF1_Score\tRatio_a_p\tRatio_a\n"
+        header = "Epoch\tTotal_Loss\tLoss_t_p\tLoss_c_p\tLoss_t\tLoss_c\tAcc_Fusion\tAcc_t_p\tAcc_c_p\tAcc_t\tAcc_c\tPrecision\tRecall\tF1_Score\tRatio_t_p\tRatio_t\n"
         f_trainloss.write(header)
         f_trainloss.flush()
 
@@ -792,11 +747,11 @@ def main():
         epoch = 0
 
         if args.dataset == 'AVE':
-            audio_proto, visual_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
+            text_proto, code_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
         elif args.dataset == 'CGMNIST':
-            audio_proto, visual_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
+            text_proto, code_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
         else:
-            audio_proto, visual_proto = calculate_prototype(args, model, train_dataloader, device, epoch)
+            text_proto, code_proto = calculate_prototype(args, model, train_dataloader, device, epoch)
 
         for epoch in range(args.epochs):
 
@@ -804,46 +759,46 @@ def main():
 
 
             s_time = time.time()
-            batch_loss, batch_loss_a, batch_loss_v, batch_loss_a_p, batch_loss_v_p, a_angle, v_angle, ratio_a, ratio_a_p, \
-               a_diff, v_diff = train_epoch(args, epoch, model, device, train_dataloader, optimizer, scheduler,
-                              audio_proto, visual_proto)
+            batch_loss, batch_loss_t, batch_loss_c, batch_loss_t_p, batch_loss_c_p, t_angle, c_angle, ratio_t, ratio_t_p, \
+               t_diff, c_diff = train_epoch(args, epoch, model, device, train_dataloader, optimizer, scheduler,
+                              text_proto, code_proto)
 
             if args.dataset == 'AVE':
-                audio_proto, visual_proto = calculate_prototype(args, model, val_dataloader, device, epoch, audio_proto, visual_proto)
+                text_proto, code_proto = calculate_prototype(args, model, val_dataloader, device, epoch, text_proto, code_proto)
             elif args.dataset == 'CGMNIST':
-                audio_proto, visual_proto = calculate_prototype(args, model, val_dataloader, device, epoch,
-                                                                audio_proto, visual_proto)
+                text_proto, code_proto = calculate_prototype(args, model, val_dataloader, device, epoch,
+                                                                text_proto, code_proto)
             else:
-                audio_proto, visual_proto = calculate_prototype(args, model, train_dataloader, device, epoch, audio_proto, visual_proto)
+                text_proto, code_proto = calculate_prototype(args, model, train_dataloader, device, epoch, text_proto, code_proto)
             e_time = time.time()
             print('per epoch time: ', e_time - s_time)
-            # print('proto22', audio_proto[22], visual_proto[22])
-            # acc, acc_a, acc_v, acc_a_p, acc_v_p = valid(args, model, device, test_dataloader, audio_proto, visual_proto)
-            acc, acc_a, acc_v, acc_a_p, acc_v_p, precision, recall, f1 = valid(args, model, device, val_dataloader, audio_proto, visual_proto)
+            # print('proto22', text_proto[22], code_proto[22])
+            # acc, acc_t, acc_c, acc_t_p, acc_c_p = valid(args, model, device, test_dataloader, text_proto, code_proto)
+            acc, acc_t, acc_c, acc_t_p, acc_c_p, precision, recall, f1 = valid(args, model, device, val_dataloader, text_proto, code_proto)
              # === 修改：控制台打印得更漂亮专业 ===
             print(f'Epoch {epoch} 考试成绩 ---> Acc: {acc*100:.2f}% | Precision: {precision*100:.2f}% | Recall: {recall*100:.2f}% | F1-Score: {f1*100:.2f}%')
-            print('epoch: ', epoch, 'loss: ', batch_loss, batch_loss_a_p, batch_loss_v_p)
-            print('epoch: ', epoch, 'acc: ', acc, 'acc_v_p: ', acc_v_p, 'acc_a_p: ', acc_a_p)
+            print('epoch: ', epoch, 'loss: ', batch_loss, batch_loss_t_p, batch_loss_c_p)
+            print('epoch: ', epoch, 'acc: ', acc, 'acc_c_p: ', acc_c_p, 'acc_t_p: ', acc_t_p)
             f_trainloss.write(str(epoch) +
                               "\t" + str(batch_loss) +
-                              "\t" + str(batch_loss_a_p) +
-                              "\t" + str(batch_loss_v_p) +
-                              "\t" + str(batch_loss_a) +
-                              "\t" + str(batch_loss_v) +
+                              "\t" + str(batch_loss_t_p) +
+                              "\t" + str(batch_loss_c_p) +
+                              "\t" + str(batch_loss_t) +
+                              "\t" + str(batch_loss_c) +
                               "\t" + str(acc) +
-                              "\t" + str(acc_a_p) +
-                              "\t" + str(acc_v_p) +
-                              "\t" + str(acc_a) +
-                              "\t" + str(acc_v) +
+                              "\t" + str(acc_t_p) +
+                              "\t" + str(acc_c_p) +
+                              "\t" + str(acc_t) +
+                              "\t" + str(acc_c) +
                               "\t" + str(precision) +
                               "\t" + str(recall) +
                               "\t" + str(f1) +
-                            #   "\t" + str(a_angle) +
-                            #   "\t" + str(v_angle) +
-                              "\t" + str(ratio_a_p) +
-                              "\t" + str(ratio_a) +
-                            #   "\t" + str(a_diff) +
-                            #   "\t" + str(v_diff) +
+                            #   "\t" + str(t_angle) +
+                            #   "\t" + str(c_angle) +
+                              "\t" + str(ratio_t_p) +
+                              "\t" + str(ratio_t) +
+                            #   "\t" + str(t_diff) +
+                            #   "\t" + str(c_diff) +
                               "\n")
             f_trainloss.flush()
 
@@ -857,8 +812,8 @@ def main():
                         'model': model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'scheduler': scheduler.state_dict() if scheduler is not None else None,
-                        'audio_proto': audio_proto,
-                        'visual_proto': visual_proto
+                        'text_proto': text_proto,
+                        'code_proto': code_proto
                     },
                     os.path.join(save_path, 'epoch-{}.pt'.format(epoch))
                 )
@@ -882,14 +837,14 @@ def main():
         print("正在计算测试所需的特征原型...")
         epoch = 0 # 假定为第0轮，用于初始化
         # 使用验证集或测试集来计算原型
-        audio_proto, visual_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
+        text_proto, code_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
 
         model.load_state_dict(state_dict)
         print('Trained model loaded!')
 
-        # acc, acc_a, acc_v = valid(args, model, device, test_dataloader)
-        acc, acc_a, acc_v, acc_a_p, acc_v_p, precision, recall, f1 = valid(args, model, device, test_dataloader, audio_proto, visual_proto)
-        print('Accuracy: {}, accuracy_a: {}, accuracy_v: {}, precision: {}, recall: {}, f1: {}'.format(acc, acc_a, acc_v, precision, recall, f1))
+        # acc, acc_t, acc_c = valid(args, model, device, test_dataloader)
+        acc, acc_t, acc_c, acc_t_p, acc_c_p, precision, recall, f1 = valid(args, model, device, test_dataloader, text_proto, code_proto)
+        print('Accuracy: {}, accuracy_t: {}, accuracy_c: {}, precision: {}, recall: {}, f1: {}'.format(acc, acc_t, acc_c, precision, recall, f1))
 
 
 if __name__ == "__main__":
