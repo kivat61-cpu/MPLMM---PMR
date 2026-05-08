@@ -88,10 +88,8 @@ def get_arguments():
     parser.add_argument('--modulation', default='OGM_GE', type=str,
                         choices=['Normal', 'OGM', 'OGM_GE', 'Acc', 'Proto'])
     parser.add_argument('--fusion_method', default='concat', type=str,
-                        choices=['sum', 'concat', 'gated', 'film'])
-    parser.add_argument('--temperature', default=0.1, type=float)
-    parser.add_argument('--fps', default=1, type=int, help='Extract how many frames in a second')
-    parser.add_argument('--num_frame', default=1, type=int, help='use how many frames for train')
+                        choices=['sum', 'concat', 'gated', 'film'],
+                        help='fusion method (仅 textcode 模型生效; prompt/mult 模型使用内置 Transformer 融合)')
 
     parser.add_argument('--optimizer', default='SGD', type=str)
 
@@ -99,7 +97,6 @@ def get_arguments():
     parser.add_argument('--epochs', default=150, type=int)
     parser.add_argument('--embed_dim', default=512, type=int)
     parser.add_argument('--momentum_coef', default=0.2, type=float)
-    parser.add_argument('--proto_update_freq', default=50, type=int, help='steps')
 
     # parser.add_argument('--optimizer', default='sgd', type=str, choices=['sgd', 'adam'])
     parser.add_argument('--learning_rate', default=0.0001, type=float, help='initial learning rate')
@@ -708,7 +705,7 @@ def main():
         trainloss_file = args.logs_path + '/Method-CE-Proto-grad-amp' + '/train_loss-' + args.dataset + '-' + args.fusion_method + '-bsz' + \
                          str(args.batch_size) + '-lr' + str(args.learning_rate) \
                          + '-epoch' + str(args.epochs) + '-' + args.modulation + str(args.alpha) + \
-                         '-mon' + str(args.momentum_coef) + '-' + str(args.num_frame) + '-end' + str(args.modulation_ends) \
+                         '-mon' + str(args.momentum_coef) + '-end' + str(args.modulation_ends) \
                          + '-optim-' + args.optimizer + 'small_data.txt'
         if not os.path.exists(args.logs_path + '/Method-CE-Proto-grad-amp'):
             os.makedirs(args.logs_path + '/Method-CE-Proto-grad-amp')
@@ -716,7 +713,7 @@ def main():
         save_path = args.ckpt_path + '/Method-CE-Proto-grad-amp' + '/model-' + args.dataset + '-' + args.fusion_method + '-bsz' + \
                     str(args.batch_size) + '-lr' + str(args.learning_rate) \
                     + '-epoch' + str(args.epochs) + '-' + args.modulation + str(args.alpha) + \
-                    '-mon' + str(args.momentum_coef) + '-' + str(args.num_frame) + '-end' + str(args.modulation_ends) \
+                    '-mon' + str(args.momentum_coef) + '-end' + str(args.modulation_ends) \
                     + '-optim-' + args.optimizer + 'small_data'
 
         if not os.path.exists(save_path):
