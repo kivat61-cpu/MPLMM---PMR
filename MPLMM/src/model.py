@@ -168,7 +168,7 @@ class MULTModel(nn.Module):
         last_hs_proj += last_hs
 
         output = self.out_layer(last_hs_proj)
-        return output
+        return last_h_l, last_h_a, output
 
 
 class PromptModel(nn.Module):

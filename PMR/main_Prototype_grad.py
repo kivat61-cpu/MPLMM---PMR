@@ -22,8 +22,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 
-from models.basic_model import AVClassifier, CGClassifier
-from utils.utils import setup_seed, weight_init
+from utils.utils import setup_seed
 
 
 import time
@@ -32,9 +31,8 @@ import time
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from dataset.TextCodeDataset import TextCodeDataset
-from models.basic_model import TextCodeClassifier
-from sklearn.metrics import precision_score, recall_score, f1_score  # === 新增这行 ===
-from models.basic_model import PromptTextCodeClassifier
+from models.basic_model import MULTTextCodeClassifier, PromptTextCodeClassifier, TextCodeClassifier
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 class MPLMMConfig:
     def __init__(self, args):
@@ -84,8 +82,9 @@ def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', required=True, type=str,
                         help='VGGSound, KineticSound, CREMAD, AVE')
-    parser.add_argument('--use_mplmm', action='store_true', 
-                        help='Turn on to use the fused PMR + MPLMM PromptModel')
+    parser.add_argument('--model_type', default='textcode', type=str,
+                        choices=['textcode', 'prompt_textcode', 'mult_textcode'],
+                        help='textcode=TextCodeClassifier, prompt_textcode=PromptTextCodeClassifier, mult_textcode=MULTTextCodeClassifier')
     parser.add_argument('--modulation', default='OGM_GE', type=str,
                         choices=['Normal', 'OGM', 'OGM_GE', 'Acc', 'Proto'])
     parser.add_argument('--fusion_method', default='concat', type=str,
@@ -208,7 +207,7 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
         optimizer.zero_grad()
         
         # === 修改点 1：根据开关选择模型调用方式 ===
-        if args.use_mplmm:
+        if args.model_type != 'textcode':
             # 融合直接返回 5 个值 (t, c, out, out_t, out_c)
             t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
         else:
@@ -424,7 +423,7 @@ def valid(args, model, device, dataloader, text_proto, code_proto):
 
 
             # === 根据开关选择模型调用方式 ===
-            if args.use_mplmm:
+            if args.model_type != 'textcode':
                 # 直接返回 5 个值 (t, c, out, out_t, out_c)
                 # missing_mod = torch.full((label.size(0),), 2).to(device)
                 t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
@@ -546,7 +545,7 @@ def calculate_prototype(args, model, dataloader, device, epoch, t_proto=None, c_
             missing_mod = batch_data['missing_mode'].to(device)
 
             # 把文本和代码喂给模型
-            if args.use_mplmm:
+            if args.model_type != 'textcode':
                 # 只需要特征 t 和 c，忽略后面三个返回值
                 t, c, _, _, _ = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
             else:
@@ -586,30 +585,21 @@ def main():
 
     device = torch.device('cuda:' + str(args.gpu) if args.use_cuda else 'cpu')
 
-    # if args.dataset == 'CGMNIST':
-    #     model = CGClassifier(args)
-    # else:
-    #     model = AVClassifier(args)
-    if args.dataset == 'CGMNIST':
-        model = CGClassifier(args)
-    elif args.dataset == 'TextCode':
-        # model = TextCodeClassifier(args, n_classes=2)  # 文本-代码模型
-        # 【修改】：根据开关选择实例化哪个模型
-        if args.use_mplmm:
-            print(">>> 使用融合模型 (PMR + MPLMM) <<<")
-            # 定义 hyp_params
+    if args.dataset == 'TextCode':
+        if args.model_type == 'prompt_textcode':
+            print(">>> 使用 PromptTextCodeClassifier (PMR + MPLMM PromptModel) <<<")
             hyp_params = MPLMMConfig(args)
             model = PromptTextCodeClassifier(args, hyp_params, n_classes=2)
+        elif args.model_type == 'mult_textcode':
+            print(">>> 使用 MULTTextCodeClassifier (PMR + MPLMM MULTModel) <<<")
+            hyp_params = MPLMMConfig(args)
+            model = MULTTextCodeClassifier(args, hyp_params, n_classes=2)
         else:
-            print(">>> 🟢 正在使用基础 PMR 模型 (TextCodeClassifier) <<<")
+            print(">>> 使用基础 TextCodeClassifier <<<")
             model = TextCodeClassifier(args, n_classes=2)
+        print(">>> 不对 TextCode 模型进行权重初始化 (使用预训练 BERT/CodeBERT) <<<")
     else:
-        model = AVClassifier(args)
-
-    if args.dataset != 'TextCode':
-        model.apply(weight_init)
-    else:
-        print(">>> 不对 TextCodeClassifier 进行权重初始化 <<<")
+        raise NotImplementedError('Only TextCode dataset is supported. Got: {}'.format(args.dataset))
     model.to(device)
 
     # model = torch.nn.DataParallel(model, device_ids=gpu_ids)
@@ -621,17 +611,16 @@ def main():
         optimizer = optim.Adagrad(model.parameters(), lr=args.learning_rate)
         scheduler = None
     elif args.optimizer == 'Adam':
-        if args.dataset == 'TextCode' and args.use_mplmm:
+        if args.dataset == 'TextCode' and args.model_type != 'textcode':
             print(f">>> 开启差异化学习率：主干(BERT)保持极小学习率，新生模块使用正常学习率 {args.learning_rate}")
+            fusion_params = (model.prompt_model.parameters() if args.model_type == 'prompt_textcode'
+                        else model.mult_model.parameters())
             optimizer_grouped_parameters = [
-                # 1. 预训练主干：必须用 1e-5 或 2e-5 保命，防止灾难性遗忘
                 {'params': model.text_net.parameters(), 'lr': 2e-5},
                 {'params': model.code_net.parameters(), 'lr': 2e-5},
-                
-                # 2. 新生模块：全部使用你命令行传进来的 args.learning_rate (建议设为 1e-4)
                 {'params': model.text_proj.parameters(), 'lr': args.learning_rate},
                 {'params': model.code_proj.parameters(), 'lr': args.learning_rate},
-                {'params': model.prompt_model.parameters(), 'lr': args.learning_rate},
+                {'params': fusion_params, 'lr': args.learning_rate},
                 {'params': model.classifier_t.parameters(), 'lr': args.learning_rate},
                 {'params': model.classifier_c.parameters(), 'lr': args.learning_rate}
             ]
