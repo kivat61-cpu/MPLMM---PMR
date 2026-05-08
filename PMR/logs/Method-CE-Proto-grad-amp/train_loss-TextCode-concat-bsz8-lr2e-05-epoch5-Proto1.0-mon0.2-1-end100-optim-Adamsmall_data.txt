@@ -1,1 +1,0 @@
-Epoch	Total_Loss	Loss_a_p	Loss_v_p	Loss_a	Loss_v	Acc_Fusion	Acc_a_p	Acc_v_p	Acc_a	Acc_v	Precision	Recall	F1_Score	Ratio_a_p	Ratio_a

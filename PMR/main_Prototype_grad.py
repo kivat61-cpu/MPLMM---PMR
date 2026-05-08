@@ -522,9 +522,21 @@ def valid(args, model, device, dataloader, audio_proto, visual_proto):
                 all_true_labels.append(label[i].cpu().item())
                 all_pred_labels.append(ma)
     # === 新增：交卷后，让 sklearn 统一算分 (使用 macro 宏平均，对 0类和 1类一视同仁) ===
-    precision = precision_score(all_true_labels, all_pred_labels, average='macro', zero_division=0)
-    recall = recall_score(all_true_labels, all_pred_labels, average='macro', zero_division=0)
-    f1 = f1_score(all_true_labels, all_pred_labels, average='macro', zero_division=0)
+    # precision = precision_score(all_true_labels, all_pred_labels, average='macro', zero_division=0)
+    # recall = recall_score(all_true_labels, all_pred_labels, average='macro', zero_division=0)
+    # f1 = f1_score(all_true_labels, all_pred_labels, average='macro', zero_division=0)
+
+
+    precision_none = precision_score(all_true_labels, all_pred_labels, average=None, zero_division=0)
+    recall_none = recall_score(all_true_labels, all_pred_labels, average=None, zero_division=0)
+    f1_none = f1_score(all_true_labels, all_pred_labels, average=None, zero_division=0)
+
+    precision = precision_none.mean()
+    recall = recall_none.mean()
+    f1 = f1_none.mean()
+
+    print(f"\n[类别 0] Precision: {precision_none[0]:.4f}, Recall: {recall_none[0]:.4f}, F1: {f1_none[0]:.4f}")
+    print(f"[类别 1] Precision: {precision_none[1]:.4f}, Recall: {recall_none[1]:.4f}, F1: {f1_none[1]:.4f}")
 
     return sum(acc) / sum(num), sum(acc_a) / sum(num), sum(acc_v) / sum(num), \
            sum(acc_a_p) / sum(num), sum(acc_v_p) / sum(num), precision, recall, f1
@@ -654,7 +666,23 @@ def main():
         optimizer = optim.Adagrad(model.parameters(), lr=args.learning_rate)
         scheduler = None
     elif args.optimizer == 'Adam':
-        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.99))
+        if args.dataset == 'TextCode' and args.use_mplmm:
+            print(f">>> 开启差异化学习率：主干(BERT)保持极小学习率，新生模块使用正常学习率 {args.learning_rate}")
+            optimizer_grouped_parameters = [
+                # 1. 预训练主干：必须用 1e-5 或 2e-5 保命，防止灾难性遗忘
+                {'params': model.text_net.parameters(), 'lr': 2e-5},
+                {'params': model.code_net.parameters(), 'lr': 2e-5},
+                
+                # 2. 新生模块：全部使用你命令行传进来的 args.learning_rate (建议设为 1e-4)
+                {'params': model.text_proj.parameters(), 'lr': args.learning_rate},
+                {'params': model.code_proj.parameters(), 'lr': args.learning_rate},
+                {'params': model.prompt_model.parameters(), 'lr': args.learning_rate},
+                {'params': model.classifier_t.parameters(), 'lr': args.learning_rate},
+                {'params': model.classifier_c.parameters(), 'lr': args.learning_rate}
+            ]
+            optimizer = optim.Adam(optimizer_grouped_parameters, betas=(0.9, 0.99))
+        else:
+            optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.99))
         scheduler = None
 
     # if args.dataset == 'VGGSound':
@@ -680,18 +708,19 @@ def main():
 
 # === 开始：数据读取与划分 ===
     print("正在读取并划分数据...")
-    master_df = pd.read_csv("official.csv") 
+    # master_df = pd.read_csv("official.csv") 
 
-    train_df, temp_df = train_test_split(
-        master_df, test_size=0.2, random_state=42, stratify=master_df['label']
-    )
-    val_df, test_df = train_test_split(
-        temp_df, test_size=0.5, random_state=42, stratify=temp_df['label']
-    )
+    # train_df, temp_df = train_test_split(
+    #     master_df, test_size=0.2, random_state=42, stratify=master_df['label']
+    # )
+    # val_df, test_df = train_test_split(
+    #     temp_df, test_size=0.5, random_state=42, stratify=temp_df['label']
+    # )
 
-    # train_dataset = TextCodeDataset(train_df, drop_rate=0.4, full_data=False)
-    # val_dataset = TextCodeDataset(val_df, full_data=True) 
-    # test_dataset = TextCodeDataset(test_df, drop_rate=0.0, full_data=True)
+    train_df = pd.read_csv("official_train.csv")
+    val_df = pd.read_csv("official_val.csv")
+    test_df = pd.read_csv("official_test.csv")
+
     train_dataset = TextCodeDataset(
         train_df, 
         drop_rate=args.drop_rate, 
@@ -818,41 +847,49 @@ def main():
                               "\n")
             f_trainloss.flush()
 
-            # if acc > best_acc or (epoch + 1) % 10 == 0:
-            #     if acc > best_acc:
-            #         best_acc = float(acc)
+            if acc > best_acc or (epoch + 1) % 10 == 0:
+                if acc > best_acc:
+                    best_acc = float(acc)
             
-            #     print('Saving model....')
-            #     torch.save(
-            #         {
-            #             'model': model.state_dict(),
-            #             'optimizer': optimizer.state_dict(),
-            #             'scheduler': scheduler.state_dict() if scheduler is not None else None
-            #         },
-            #         os.path.join(save_path, 'epoch-{}.pt'.format(epoch))
-            #     )
-            #     print('Saved model!!!')
+                print('Saving model....')
+                torch.save(
+                    {
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict() if scheduler is not None else None,
+                        'audio_proto': audio_proto,
+                        'visual_proto': visual_proto
+                    },
+                    os.path.join(save_path, 'epoch-{}.pt'.format(epoch))
+                )
+                print('Saved model!!!')
         f_trainloss.close()
 
     else:
         # first load trained model
         loaded_dict = torch.load(args.ckpt_path)
         # epoch = loaded_dict['saved_epoch']
-        modulation = loaded_dict['modulation']
+        # modulation = loaded_dict['modulation']
         # alpha = loaded_dict['alpha']
-        fusion = loaded_dict['fusion']
+        # fusion = loaded_dict['fusion']
         state_dict = loaded_dict['model']
         # optimizer_dict = loaded_dict['optimizer']
         # scheduler = loaded_dict['scheduler']
 
-        assert modulation == args.modulation, 'inconsistency between modulation method of loaded model and args !'
-        assert fusion == args.fusion_method, 'inconsistency between fusion method of loaded model and args !'
+        # assert modulation == args.modulation, 'inconsistency between modulation method of loaded model and args !'
+        # assert fusion == args.fusion_method, 'inconsistency between fusion method of loaded model and args !'
+
+        print("正在计算测试所需的特征原型...")
+        epoch = 0 # 假定为第0轮，用于初始化
+        # 使用验证集或测试集来计算原型
+        audio_proto, visual_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
 
         model.load_state_dict(state_dict)
         print('Trained model loaded!')
 
-        acc, acc_a, acc_v = valid(args, model, device, test_dataloader)
-        print('Accuracy: {}, accuracy_a: {}, accuracy_v: {}'.format(acc, acc_a, acc_v))
+        # acc, acc_a, acc_v = valid(args, model, device, test_dataloader)
+        acc, acc_a, acc_v, acc_a_p, acc_v_p, precision, recall, f1 = valid(args, model, device, test_dataloader, audio_proto, visual_proto)
+        print('Accuracy: {}, accuracy_a: {}, accuracy_v: {}, precision: {}, recall: {}, f1: {}'.format(acc, acc_a, acc_v, precision, recall, f1))
 
 
 if __name__ == "__main__":

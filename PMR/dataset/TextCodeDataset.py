@@ -17,19 +17,6 @@ class TextCodeDataset(Dataset):
         self.drop_rate = drop_rate
         self.full_data = full_data
 
-    def get_missing_mode(self):
-        """
-        双模态缺失逻辑：
-        0: 缺描述文本
-        1: 缺代码
-        2: 都不缺失
-        """
-        if self.full_data:
-            return 2
-        if random.random() < self.drop_rate:
-            return random.randint(0, 1)
-        else:
-            return 2
 
     def __len__(self):
         return len(self.data)
@@ -48,10 +35,32 @@ class TextCodeDataset(Dataset):
         real_text_missing = pd.isna(raw_text) or str(raw_text).strip() == ""
         real_code_missing = pd.isna(raw_code) or str(raw_code).strip() == ""
 
+        if real_text_missing:
+            missing_mode = 0  # 真实缺文本
+        elif real_code_missing:
+            missing_mode = 1  # 真实缺代码
+        else:
+            # 走到这里说明真实数据都不缺，我们再决定要不要“模拟缺失”来锻炼模型
+            if self.full_data:
+                missing_mode = 2  # 
+            elif random.random() < self.drop_rate:
+                missing_mode = random.randint(0, 1) # 假装缺失一个
+            else:
+                missing_mode = 2  # 正常完整使用
+
         # 为了防止 tokenizer 报错，如果真实缺失，我们塞入一个毫无意义的占位符（比如 [PAD]）
         # 反正底层模型看到 missing_mode=0/1 时，会直接丢弃这个模态的特征去生成它
-        text_str = "[PAD]" if real_text_missing else str(raw_text)
-        code_str = "[PAD]" if real_code_missing else str(raw_code)
+        # text_str = "[PAD]" if real_text_missing else str(raw_text)
+        # code_str = "[PAD]" if real_code_missing else str(raw_code)
+        if missing_mode == 0:
+            text_str = "[PAD]"  # 强行抹除文本
+            code_str = str(raw_code)
+        elif missing_mode == 1:
+            text_str = str(raw_text)
+            code_str = "[PAD]"  # 强行抹除代码
+        else:
+            text_str = str(raw_text)
+            code_str = str(raw_code)
 
         text_enc = self.text_tokenizer(
             text_str, truncation=True, padding='max_length', 
@@ -63,18 +72,7 @@ class TextCodeDataset(Dataset):
             max_length=self.max_length, return_tensors='pt'
         )
 
-        if real_text_missing:
-            missing_mode = 0  # 真实缺文本
-        elif real_code_missing:
-            missing_mode = 1  # 真实缺代码
-        else:
-            # 走到这里说明真实数据都不缺，我们再决定要不要“模拟缺失”来锻炼模型
-            if self.full_data:
-                missing_mode = 2  # 考试模式，有啥用啥，绝不假装缺失
-            elif random.random() < self.drop_rate:
-                missing_mode = random.randint(0, 1) # 训练模式，假装缺失一个
-            else:
-                missing_mode = 2  # 正常完整使用
+        
 
         return {
             'text_input_ids': text_enc['input_ids'].squeeze(0),
