@@ -70,27 +70,37 @@ class PromptTextCodeClassifier(nn.Module):
         
         # 3. 核心机制：替换掉原本简单的 fusion_module，使用你的 PromptModel
         self.prompt_model = PromptModel(hyp_params)
-        
+
+        self.num_tokens = hyp_params.seq_len[0]
+
         # 4. 单模态分类头 (PMR 算法需要计算单模态的 score 来评估学习进度)
         self.classifier_t = nn.Linear(hyp_params.d_l, n_classes)
         self.classifier_c = nn.Linear(hyp_params.d_a, n_classes)
 
     def forward(self, text_input_ids, text_attn_mask, code_input_ids, code_attn_mask, missing_mod):
-        # 1. 提取全序列特征 [Batch, Seq_len, 768]
-        t_seq = self.text_net(input_ids=text_input_ids, attention_mask=text_attn_mask).last_hidden_state[:, 0:1, :]
-        c_seq = self.code_net(input_ids=code_input_ids, attention_mask=code_attn_mask).last_hidden_state[:, 0:1, :]
-        
+        num_tokens = self.num_tokens
+
+        # 1. 提取特征序列
+        full_t = self.text_net(input_ids=text_input_ids, attention_mask=text_attn_mask).last_hidden_state
+        full_c = self.code_net(input_ids=code_input_ids, attention_mask=code_attn_mask).last_hidden_state
+        if num_tokens == 1:
+            t_seq = full_t[:, 0:1, :]   # [CLS] token
+            c_seq = full_c[:, 0:1, :]
+        else:
+            t_seq = F.adaptive_avg_pool1d(full_t.transpose(1, 2), num_tokens).transpose(1, 2)
+            c_seq = F.adaptive_avg_pool1d(full_c.transpose(1, 2), num_tokens).transpose(1, 2)
+
         # 2. 维度映射
         t_seq = self.text_proj(t_seq)
         c_seq = self.code_proj(c_seq)
-        
+
         # 3. 送入 PromptModel 获取独立特征和总预测
         feat_t, feat_c, out = self.prompt_model(t_seq, c_seq, missing_mod)
-        
+
         # 4. 计算单模态预测 (专供 PMR 算法计算比例使用)
         out_t = self.classifier_t(feat_t)
         out_c = self.classifier_c(feat_c)
-        
+
         return feat_t, feat_c, out, out_t, out_c
 
 
@@ -109,17 +119,28 @@ class MULTTextCodeClassifier(nn.Module):
         self.classifier_t = nn.Linear(hyp_params.d_l, n_classes)
         self.classifier_c = nn.Linear(hyp_params.d_a, n_classes)
 
+        self.num_tokens = hyp_params.seq_len[0]
+
     def forward(self, text_input_ids, text_attn_mask, code_input_ids, code_attn_mask, missing_mod=None):
-        t_seq = self.text_net(input_ids=text_input_ids, attention_mask=text_attn_mask).last_hidden_state[:, 0:1, :]
-        c_seq = self.code_net(input_ids=code_input_ids, attention_mask=code_attn_mask).last_hidden_state[:, 0:1, :]
+        num_tokens = self.num_tokens
+
+        full_t = self.text_net(input_ids=text_input_ids, attention_mask=text_attn_mask).last_hidden_state
+        full_c = self.code_net(input_ids=code_input_ids, attention_mask=code_attn_mask).last_hidden_state
+        if num_tokens == 1:
+            t_seq = full_t[:, 0:1, :]   # [CLS] token
+            c_seq = full_c[:, 0:1, :]
+        else:
+            t_seq = F.adaptive_avg_pool1d(full_t.transpose(1, 2), num_tokens).transpose(1, 2)
+            c_seq = F.adaptive_avg_pool1d(full_c.transpose(1, 2), num_tokens).transpose(1, 2)
 
         t_seq = self.text_proj(t_seq)
         c_seq = self.code_proj(c_seq)
 
         feat_t, feat_c, out = self.mult_model(t_seq, c_seq)
 
-        feat_t = feat_t.squeeze(0)
-        feat_c = feat_c.squeeze(0)
+        # feat_t/feat_c: [N, B, D] → mean over tokens → [B, D]
+        feat_t = feat_t.mean(dim=0)
+        feat_c = feat_c.mean(dim=0)
 
         out_t = self.classifier_t(feat_t)
         out_c = self.classifier_c(feat_c)

@@ -19,7 +19,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
 
 from utils.utils import setup_seed
@@ -29,7 +28,6 @@ import time
 
 
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from dataset.TextCodeDataset import TextCodeDataset
 from models.basic_model import MULTTextCodeClassifier, PromptTextCodeClassifier, TextCodeClassifier
 from sklearn.metrics import precision_score, recall_score, f1_score
@@ -76,7 +74,7 @@ class MPLMMConfig:
         # --- 6. 序列长度 (seq_len) ---
         # 注意：这必须和你 PMR 项目中 TextCodeDataset.py 里的 max_length 一致
         # 假设你的 Tokenizer 设置的 max_length 是 512
-        self.seq_len = (1, 1)          # (llen, alen)
+        self.seq_len = (args.num_tokens, args.num_tokens)          # (llen, alen) — 池化后token数
 
 def get_arguments():
     parser = argparse.ArgumentParser()
@@ -97,6 +95,9 @@ def get_arguments():
     parser.add_argument('--epochs', default=150, type=int)
     parser.add_argument('--embed_dim', default=512, type=int)
     parser.add_argument('--momentum_coef', default=0.2, type=float)
+
+    parser.add_argument('--num_tokens', default=8, type=int,
+                        help='pooling后的token数量,用于MPLMM的Transformer交叉注意力 (仅 prompt/mult 模型生效)')
 
     # parser.add_argument('--optimizer', default='sgd', type=str, choices=['sgd', 'adam'])
     parser.add_argument('--learning_rate', default=0.0001, type=float, help='initial learning rate')
@@ -658,9 +659,9 @@ def main():
     #     temp_df, test_size=0.5, random_state=42, stratify=temp_df['label']
     # )
 
-    train_df = pd.read_csv("official_train.csv")
-    val_df = pd.read_csv("official_val.csv")
-    test_df = pd.read_csv("official_test.csv")
+    train_df = pd.read_csv("data/official/official_train.csv")
+    val_df = pd.read_csv("data/official/official_val.csv")
+    test_df = pd.read_csv("data/official/official_test.csv")
 
     train_dataset = TextCodeDataset(
         train_df, 
