@@ -30,6 +30,9 @@ class TextCodeDataset(Dataset):
         raw_text = row['text']
         raw_code = row['code']
         label = int(row['label'])
+        fqn_raw = row.get('FQN', '')
+        fqn_missing = pd.isna(fqn_raw) or str(fqn_raw).strip() == ""
+        fqn = str(fqn_raw)
 
         # 判断是否为真实的缺失 (比如 pandas 读进来是 NaN，或者空字符串)
         real_text_missing = pd.isna(raw_text) or str(raw_text).strip() == ""
@@ -42,25 +45,24 @@ class TextCodeDataset(Dataset):
         else:
             # 走到这里说明真实数据都不缺，我们再决定要不要“模拟缺失”来锻炼模型
             if self.full_data:
-                missing_mode = 2  # 
+                missing_mode = 2
             elif random.random() < self.drop_rate:
-                missing_mode = random.randint(0, 1) # 假装缺失一个
+                missing_mode = random.randint(0, 1)  # 假装缺失一个
             else:
                 missing_mode = 2  # 正常完整使用
 
-        # 为了防止 tokenizer 报错，如果真实缺失，我们塞入一个毫无意义的占位符（比如 [PAD]）
-        # 反正底层模型看到 missing_mode=0/1 时，会直接丢弃这个模态的特征去生成它
-        # text_str = "[PAD]" if real_text_missing else str(raw_text)
-        # code_str = "[PAD]" if real_code_missing else str(raw_code)
+        # API 标识前缀：只加到不缺失的模态上
+        api_prefix = f"[API: {fqn}] " if not fqn_missing else ""
+
         if missing_mode == 0:
-            text_str = "[PAD]"  # 强行抹除文本
-            code_str = str(raw_code)
+            text_str = "[PAD]"  # 文本真实缺失，不能加 API 名
+            code_str = api_prefix + str(raw_code)
         elif missing_mode == 1:
-            text_str = str(raw_text)
-            code_str = "[PAD]"  # 强行抹除代码
+            text_str = api_prefix + str(raw_text)
+            code_str = "[PAD]"  # 代码真实缺失，不能加 API 名
         else:
-            text_str = str(raw_text)
-            code_str = str(raw_code)
+            text_str = api_prefix + str(raw_text)
+            code_str = api_prefix + str(raw_code)
 
         text_enc = self.text_tokenizer(
             text_str, truncation=True, padding='max_length', 

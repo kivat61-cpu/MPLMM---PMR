@@ -29,31 +29,29 @@ class TextCodeClassifier(nn.Module):
         self.code_net = AutoModel.from_pretrained('microsoft/codebert-base')
 
         # 3. 增加维度对齐层 (Projection Layer)
-        # BERT模型通常输出 384 或 768 维，而原项目的 fusion_module 默认接收 args.embed_dim (如 512维)
-        self.text_proj = nn.Linear(768, args.embed_dim) # MiniLM-L6 是 384 维
-        self.code_proj = nn.Linear(768, args.embed_dim) # CodeBERT 是 768 维
+        self.text_proj = nn.Linear(768, args.embed_dim)
+        self.code_proj = nn.Linear(768, args.embed_dim)
 
-    def forward(self, text_input_ids, text_attn_mask, code_input_ids, code_attn_mask):
-        # 1. 文本分支：提取特征向量
+        # 4. 独立单模态分类头 (PMR 算法需要)
+        self.classifier_t = nn.Linear(args.embed_dim, n_classes)
+        self.classifier_c = nn.Linear(args.embed_dim, n_classes)
+
+    def forward(self, text_input_ids, text_attn_mask, code_input_ids, code_attn_mask, missing_mod=None):
         text_outputs = self.text_net(input_ids=text_input_ids, attention_mask=text_attn_mask)
-        # 取 [CLS] token 的向量作为整个文本序列的特征
-        t = text_outputs.last_hidden_state[:, 0, :] 
-        
-        # 2. 代码分支：提取特征向量
-        code_outputs = self.code_net(input_ids=code_input_ids, attention_mask=code_attn_mask)
-        # 同样取 [CLS] token
-        c = code_outputs.last_hidden_state[:, 0, :] 
+        t = text_outputs.last_hidden_state[:, 0, :]
 
-        # 3. 维度对齐映射 (投射到 512 维)
+        code_outputs = self.code_net(input_ids=code_input_ids, attention_mask=code_attn_mask)
+        c = code_outputs.last_hidden_state[:, 0, :]
+
         t = self.text_proj(t)
         c = self.code_proj(c)
 
-        # 4. 进入原项目的多模态融合层
-        # 这里 t 相当于原来的 a(音频), c 相当于原来的 v(视觉)
         t, c, out = self.fusion_module(t, c)
 
-        # 返回文本纯预测、代码纯预测、以及融合总预测 (完美契合 OGM/PMR 策略)
-        return t, c, out
+        out_t = self.classifier_t(t)
+        out_c = self.classifier_c(c)
+
+        return t, c, out, out_t, out_c
     
 from MPLMM.src.model import MULTModel, PromptModel
 class PromptTextCodeClassifier(nn.Module):
