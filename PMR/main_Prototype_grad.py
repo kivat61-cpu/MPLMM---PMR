@@ -79,7 +79,7 @@ class MPLMMConfig:
 def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', required=True, type=str,
-                        help='TextCode')
+                        help='VGGSound, KineticSound, CREMAD, AVE')
     parser.add_argument('--model_type', default='textcode', type=str,
                         choices=['textcode', 'prompt_textcode', 'mult_textcode'],
                         help='textcode=TextCodeClassifier, prompt_textcode=PromptTextCodeClassifier, mult_textcode=MULTTextCodeClassifier')
@@ -155,7 +155,7 @@ def grad_amplitude_diff(v1, v2):
 
 def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
                 text_proto, code_proto, writer=None):
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion = nn.CrossEntropyLoss()
     softmax = nn.Softmax(dim=1)
     relu = nn.ReLU(inplace=True)
     tanh = nn.Tanh()
@@ -204,7 +204,29 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
         missing_mod = batch_data['missing_mode'].to(device)
         optimizer.zero_grad()
         
-        t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+        # === 修改点 1：根据开关选择模型调用方式 ===
+        if args.model_type != 'textcode':
+            # 融合直接返回 5 个值 (t, c, out, out_t, out_c)
+            t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+        else:
+            # 基础模型只返回 3 个值 (t, c, out)
+            t, c, out = model(t_ids, t_mask, c_ids, c_mask)
+
+            # === 修改点 2：将原本繁琐的单模态计算逻辑移入 else 分支 ===
+            if args.fusion_method == 'sum':
+                out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
+                         model.fusion_module.fc_y.bias)
+                out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
+                         model.fusion_module.fc_x.bias)
+            elif args.fusion_method == 'concat':
+                weight_size = model.fusion_module.fc_out.weight.size(1)
+                out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
+                         + model.fusion_module.fc_out.bias / 2)
+                out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
+                         + model.fusion_module.fc_out.bias / 2)
+            elif args.fusion_method == 'film' or args.fusion_method == 'gated':
+                out_c = out
+                out_t = out
 
         text_sim = -EU_dist(t, text_proto)  # B x n_class
         code_sim = -EU_dist(c, code_proto)  # B x n_class
@@ -324,7 +346,6 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
         print('loss: ', loss.data, 'loss_p_c: ', loss_proto_c.data, 'loss_p_t: ', loss_proto_t.data,
               'loss_c: ', loss_c.data, 'loss_t: ', loss_t.data)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         _loss += loss.item()
@@ -337,7 +358,7 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler,
         _ratio_t += ratio_t.item() if isinstance(ratio_t, torch.Tensor) else ratio_t
         _ratio_t_p += ratio_t_p.item() if isinstance(ratio_t_p, torch.Tensor) else ratio_t_p
 
-    if scheduler is not None:
+    if args.optimizer == 'SGD':
         scheduler.step()
     # f_angle.close()
 
@@ -399,7 +420,30 @@ def valid(args, model, device, dataloader, text_proto, code_proto):
             missing_mod = batch_data['missing_mode'].to(device)
 
 
-            t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+            # === 根据开关选择模型调用方式 ===
+            if args.model_type != 'textcode':
+                # 直接返回 5 个值 (t, c, out, out_t, out_c)
+                # missing_mod = torch.full((label.size(0),), 2).to(device)
+                t, c, out, out_t, out_c = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+            else:
+                # 基础模型只返回 3 个值 (t, c, out)
+                t, c, out = model(t_ids, t_mask, c_ids, c_mask)
+
+                # === 修改点 2：将原本繁琐的单模态计算逻辑移入 else 分支 ===
+                if args.fusion_method == 'sum':
+                    out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_y.weight, 0, 1)) +
+                            model.fusion_module.fc_y.bias)
+                    out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_x.weight, 0, 1)) +
+                            model.fusion_module.fc_x.bias)
+                elif args.fusion_method == 'concat':
+                    weight_size = model.fusion_module.fc_out.weight.size(1)
+                    out_c = (torch.mm(c, torch.transpose(model.fusion_module.fc_out.weight[:, weight_size // 2:], 0, 1))
+                            + model.fusion_module.fc_out.bias / 2)
+                    out_t = (torch.mm(t, torch.transpose(model.fusion_module.fc_out.weight[:, :weight_size // 2], 0, 1))
+                            + model.fusion_module.fc_out.bias / 2)
+                elif args.fusion_method == 'film' or args.fusion_method == 'gated':
+                    out_c = out
+                    out_t = out
 
             prediction = softmax(out)
             pred_c = softmax(out_c)
@@ -496,10 +540,14 @@ def calculate_prototype(args, model, dataloader, device, epoch, t_proto=None, c_
             c_ids = batch_data['code_input_ids'].to(device)
             c_mask = batch_data['code_attention_mask'].to(device)
             label = batch_data['label'].to(device)
-            missing_mod = torch.full((label.size(0),), 2).to(device)
+            missing_mod = batch_data['missing_mode'].to(device)
 
             # 把文本和代码喂给模型
-            t, c, _, _, _ = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+            if args.model_type != 'textcode':
+                # 只需要特征 t 和 c，忽略后面三个返回值
+                t, c, _, _, _ = model(t_ids, t_mask, c_ids, c_mask, missing_mod)
+            else:
+                t, c, out = model(t_ids, t_mask, c_ids, c_mask)
 
             for idx, l in enumerate(label):
                 l = l.long()
@@ -535,15 +583,6 @@ def main():
 
     device = torch.device('cuda:' + str(args.gpu) if args.use_cuda else 'cpu')
 
-    if not args.train and args.ckpt_path:
-        loaded_ckpt = torch.load(args.ckpt_path, map_location='cpu')
-        saved_num_tokens = loaded_ckpt.get('num_tokens', 1)
-        if saved_num_tokens != args.num_tokens:
-            print(f">>> 检测到 checkpoint num_tokens={saved_num_tokens}，覆盖 CLI 参数 {args.num_tokens}")
-            args.num_tokens = saved_num_tokens
-    else:
-        loaded_ckpt = None
-
     if args.dataset == 'TextCode':
         if args.model_type == 'prompt_textcode':
             print(">>> 使用 PromptTextCodeClassifier (PMR + MPLMM PromptModel) <<<")
@@ -570,14 +609,10 @@ def main():
         optimizer = optim.Adagrad(model.parameters(), lr=args.learning_rate)
         scheduler = None
     elif args.optimizer == 'Adam':
-        if args.dataset == 'TextCode':
+        if args.dataset == 'TextCode' and args.model_type != 'textcode':
             print(f">>> 开启差异化学习率：主干(BERT)保持极小学习率，新生模块使用正常学习率 {args.learning_rate}")
-            if args.model_type == 'textcode':
-                fusion_params = model.fusion_module.parameters()
-            elif args.model_type == 'prompt_textcode':
-                fusion_params = model.prompt_model.parameters()
-            else:
-                fusion_params = model.mult_model.parameters()
+            fusion_params = (model.prompt_model.parameters() if args.model_type == 'prompt_textcode'
+                        else model.mult_model.parameters())
             optimizer_grouped_parameters = [
                 {'params': model.text_net.parameters(), 'lr': 2e-5},
                 {'params': model.code_net.parameters(), 'lr': 2e-5},
@@ -590,10 +625,7 @@ def main():
             optimizer = optim.Adam(optimizer_grouped_parameters, betas=(0.9, 0.99))
         else:
             optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.99))
-        scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.01, total_iters=3
-        )
-        print(">>> 学习率 Warmup：前 3 epoch 线性从 1% 升至 100% <<<")
+        scheduler = None
 
     # if args.dataset == 'VGGSound':
     #     train_dataset = VGGSound(args, mode='train')
@@ -762,37 +794,42 @@ def main():
                     best_acc = float(acc)
             
                 print('Saving model....')
-                save_path_epoch = os.path.join(save_path, 'epoch-{}.pt'.format(epoch))
-                tmp_path = save_path_epoch + '.tmp'
                 torch.save(
                     {
                         'model': model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'scheduler': scheduler.state_dict() if scheduler is not None else None,
                         'text_proto': text_proto,
-                        'code_proto': code_proto,
-                        'num_tokens': args.num_tokens,
+                        'code_proto': code_proto
                     },
-                    tmp_path
+                    os.path.join(save_path, 'epoch-{}.pt'.format(epoch))
                 )
-                os.replace(tmp_path, save_path_epoch)
-                print('Saved model!!! ({} MB)'.format(
-                    os.path.getsize(save_path_epoch) / 1024 / 1024))
+                print('Saved model!!!')
         f_trainloss.close()
 
     else:
-        state_dict = loaded_ckpt['model']
+        # first load trained model
+        loaded_dict = torch.load(args.ckpt_path)
+        # epoch = loaded_dict['saved_epoch']
+        # modulation = loaded_dict['modulation']
+        # alpha = loaded_dict['alpha']
+        # fusion = loaded_dict['fusion']
+        state_dict = loaded_dict['model']
+        # optimizer_dict = loaded_dict['optimizer']
+        # scheduler = loaded_dict['scheduler']
+
+        # assert modulation == args.modulation, 'inconsistency between modulation method of loaded model and args !'
+        # assert fusion == args.fusion_method, 'inconsistency between fusion method of loaded model and args !'
+
+        print("正在计算测试所需的特征原型...")
+        epoch = 0 # 假定为第0轮，用于初始化
+        # 使用验证集或测试集来计算原型
+        text_proto, code_proto = calculate_prototype(args, model, val_dataloader, device, epoch)
 
         model.load_state_dict(state_dict)
         print('Trained model loaded!')
 
-        text_proto = loaded_ckpt.get('text_proto')
-        code_proto = loaded_ckpt.get('code_proto')
-        if text_proto is not None:
-            text_proto = text_proto.to(device)
-            code_proto = code_proto.to(device)
-            print('Prototypes loaded from checkpoint!')
-
+        # acc, acc_t, acc_c = valid(args, model, device, test_dataloader)
         acc, acc_t, acc_c, acc_t_p, acc_c_p, precision, recall, f1 = valid(args, model, device, test_dataloader, text_proto, code_proto)
         print('Accuracy: {}, accuracy_t: {}, accuracy_c: {}, precision: {}, recall: {}, f1: {}'.format(acc, acc_t, acc_c, precision, recall, f1))
 
